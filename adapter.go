@@ -2,11 +2,11 @@ package pebbleadapter
 
 import (
 	"bytes"
-	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/goccy/go-json"
 
 	"github.com/casbin/casbin/v2/model"
 	"github.com/casbin/casbin/v2/persist"
@@ -15,6 +15,8 @@ import (
 
 var _ persist.Adapter = (*adapter)(nil)
 var _ persist.UpdatableAdapter = (*adapter)(nil)
+
+// var _ persist.FilteredAdapter = (*adapter)(nil)
 
 // CasbinRule represents a Casbin rule line.
 type CasbinRule struct {
@@ -39,7 +41,7 @@ type adapter struct {
 
 // NewAdapter creates a new adapter. It assumes that the Pebble DB is already open. A prefix is used if given and
 // represents the Pebble prefix to save the under.
-func NewAdapter(db *pebble.DB, prefix string) (*adapter, error) {
+func NewAdapter(db *pebble.DB, prefix string) (persist.BatchAdapter, error) {
 	if prefix == "" {
 		return nil, errors.New("must provide a prefix")
 	}
@@ -52,13 +54,17 @@ func NewAdapter(db *pebble.DB, prefix string) (*adapter, error) {
 	return adapter, nil
 }
 
+func (a *adapter) IsFiltered() bool {
+	return false
+}
+
 // LoadPolicy performs a scan on the bucket and individually loads every line into the Casbin model.
 // Not particularity efficient but should only be required on when you application starts up as this adapter can
 // leverage auto-save functionality.
 func (a *adapter) LoadPolicy(model model.Model) error {
 	iter, err := a.db.NewIter(&pebble.IterOptions{
-		// LowerBound: i.byteRange[0],
-		// UpperBound: i.byteRange[1],
+		LowerBound: a.prefix,
+		UpperBound: append(a.prefix, 0xff),
 	})
 	if err != nil {
 		return fmt.Errorf("creating db iterator: %w", err)
@@ -86,7 +92,7 @@ func (a *adapter) AddPolicy(_ string, ptype string, rule []string) error {
 	if err != nil {
 		return err
 	}
-	return a.db.Set([]byte(line.Key), bts, pebble.Sync)
+	return a.db.Set(a.withPrefix(line.Key), bts, pebble.Sync)
 }
 
 // AddPolicies inserts or updates multiple rules by iterating over each one and inserting it into the bucket.
@@ -98,7 +104,7 @@ func (a *adapter) AddPolicies(_ string, ptype string, rules [][]string) error {
 		if err != nil {
 			return err
 		}
-		if err := batch.Set([]byte(line.Key), bts, nil); err != nil {
+		if err := batch.Set(a.withPrefix(line.Key), bts, nil); err != nil {
 			return err
 		}
 	}
@@ -130,14 +136,10 @@ func (a *adapter) AddPolicies(_ string, ptype string, rules [][]string) error {
 //
 //	enforcer.RemoveFilteredPolicy(1, "action-a")
 //
-// This is because we use leverage Pebble's seek and prefix to find an item by prefix.
+// This is because we use leverage Pebble's prefix scan to find an item.
 // Once these keys are found we can iterate over and remove them.
 // Each policy rule is stored as a row in Pebble: p::subject-a::action-a::get
 func (a *adapter) RemoveFilteredPolicy(_ string, ptype string, fieldIndex int, fieldValues ...string) error {
-	if fieldIndex != 0 {
-		return errors.New("fieldIndex != 0: adapter only supports filter by prefix")
-	}
-
 	rule := CasbinRule{}
 
 	rule.PType = ptype
@@ -161,25 +163,31 @@ func (a *adapter) RemoveFilteredPolicy(_ string, ptype string, fieldIndex int, f
 	}
 
 	filterPrefix := a.buildFilter(rule)
-
-	matched := [][]byte{}
 	iter, err := a.db.NewIter(&pebble.IterOptions{
-		// LowerBound: i.byteRange[0],
-		// UpperBound: i.byteRange[1],
+		LowerBound: a.prefix,
+		UpperBound: append(a.prefix, 0xff),
 		SkipPoint: func(userKey []byte) bool {
-			return !bytes.HasPrefix(userKey, []byte(filterPrefix))
+			userKey = bytes.TrimPrefix(userKey, a.prefix)
+			if !bytes.HasPrefix(userKey, []byte(rule.PType)) {
+				return false
+			}
+			for range fieldIndex + 1 {
+				i := bytes.Index(userKey, []byte("::"))
+				if i < 0 {
+					return false // no more fields to check
+				}
+				userKey = userKey[i+2:]
+			}
+			return !bytes.Contains(userKey, []byte(filterPrefix))
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("creating db iterator: %w", err)
 	}
-	iter.Close()
-	for iter.First(); iter.Valid(); iter.Next() {
-		matched = append(matched, iter.Key())
-	}
+	defer iter.Close()
 	batch := a.db.NewBatch()
-	for _, k := range matched {
-		if err := batch.Delete(k, nil); err != nil {
+	for iter.First(); iter.Valid(); iter.Next() {
+		if err := batch.Delete(bytes.Clone(iter.Key()), nil); err != nil {
 			return err
 		}
 	}
@@ -190,7 +198,7 @@ func (a *adapter) RemoveFilteredPolicy(_ string, ptype string, fieldIndex int, f
 }
 
 func (a *adapter) buildFilter(rule CasbinRule) string {
-	filter := rule.PType
+	filter := "" // rule.PType
 	if rule.V0 != "" {
 		filter = fmt.Sprintf("%s::%s", filter, rule.V0)
 	}
@@ -209,13 +217,17 @@ func (a *adapter) buildFilter(rule CasbinRule) string {
 	if rule.V5 != "" {
 		filter = fmt.Sprintf("%s::%s", filter, rule.V5)
 	}
-	return filter
+	return strings.Trim(filter, ":")
+}
+
+func (a *adapter) withPrefix(key string) []byte {
+	return fmt.Append(a.prefix, key)
 }
 
 // RemovePolicy removes a policy line that matches key.
 func (a *adapter) RemovePolicy(_ string, ptype string, line []string) error {
 	rule := convertRule(ptype, line)
-	return a.db.Delete([]byte(rule.Key), pebble.Sync)
+	return a.db.Delete(a.withPrefix(rule.Key), pebble.Sync)
 }
 
 // RemovePolicies removes multiple policies.
@@ -223,7 +235,7 @@ func (a *adapter) RemovePolicies(_ string, ptype string, rules [][]string) error
 	batch := a.db.NewBatch()
 	for _, r := range rules {
 		rule := convertRule(ptype, r)
-		if err := batch.Delete([]byte(rule.Key), nil); err != nil {
+		if err := batch.Delete(a.withPrefix(rule.Key), nil); err != nil {
 			return err
 		}
 	}
@@ -237,7 +249,7 @@ func (a *adapter) UpdatePolicy(_ string, ptype string, oldRule, newRule []string
 	old := convertRule(ptype, oldRule)
 	new := convertRule(ptype, newRule)
 	batch := a.db.NewBatch()
-	if err := batch.Delete([]byte(old.Key), nil); err != nil {
+	if err := batch.Delete(a.withPrefix(old.Key), nil); err != nil {
 		return err
 	}
 	bts, err := json.Marshal(new)
@@ -245,7 +257,7 @@ func (a *adapter) UpdatePolicy(_ string, ptype string, oldRule, newRule []string
 		return err
 	}
 
-	if err := batch.Set([]byte(new.Key), bts, nil); err != nil {
+	if err := batch.Set(a.withPrefix(new.Key), bts, nil); err != nil {
 		return err
 	}
 	if err := batch.Commit(pebble.Sync); err != nil {
@@ -260,7 +272,7 @@ func (a *adapter) UpdatePolicies(_ string, ptype string, oldRules, newRules [][]
 	for _, r := range oldRules {
 		old := convertRule(ptype, r)
 
-		if err := batch.Delete([]byte(old.Key), nil); err != nil {
+		if err := batch.Delete(a.withPrefix(old.Key), nil); err != nil {
 			return err
 		}
 	}
@@ -273,7 +285,7 @@ func (a *adapter) UpdatePolicies(_ string, ptype string, oldRules, newRules [][]
 			return err
 		}
 
-		if err := batch.Set([]byte(new.Key), bts, nil); err != nil {
+		if err := batch.Set(a.withPrefix(new.Key), bts, nil); err != nil {
 			return err
 		}
 	}
@@ -284,11 +296,6 @@ func (a *adapter) UpdatePolicies(_ string, ptype string, oldRules, newRules [][]
 }
 
 func (a *adapter) UpdateFilteredPolicies(_ string, ptype string, newPolicies [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
-
-	if fieldIndex != 0 {
-		return nil, errors.New("fieldIndex != 0: adapter only supports filter by prefix")
-	}
-
 	rule := CasbinRule{}
 
 	rule.PType = ptype
@@ -314,31 +321,39 @@ func (a *adapter) UpdateFilteredPolicies(_ string, ptype string, newPolicies [][
 	filterPrefix := a.buildFilter(rule)
 	matched := []CasbinRule{}
 	iter, err := a.db.NewIter(&pebble.IterOptions{
-		// LowerBound: i.byteRange[0],
-		// UpperBound: i.byteRange[1],
+		LowerBound: a.prefix,
+		UpperBound: append(a.prefix, 0xff),
 		SkipPoint: func(userKey []byte) bool {
-			return !bytes.HasPrefix(userKey, []byte(filterPrefix))
+			userKey = bytes.TrimPrefix(userKey, a.prefix)
+			if !bytes.HasPrefix(userKey, []byte(rule.PType)) {
+				return false
+			}
+			for range fieldIndex + 1 {
+				i := bytes.Index(userKey, []byte("::"))
+				if i < 0 {
+					return false // no more fields to check
+				}
+				userKey = userKey[i+2:]
+			}
+			return !bytes.Contains(userKey, []byte(filterPrefix))
 		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating db iterator: %w", err)
 	}
-	iter.Close()
+	defer iter.Close()
+	batch := a.db.NewBatch()
+	oldRules := make([][]string, 0, len(matched))
 	for iter.First(); iter.Valid(); iter.Next() {
 		r := CasbinRule{}
 		if err := json.Unmarshal(iter.Value(), &r); err != nil {
 			return nil, err
 		}
-		matched = append(matched, r)
-	}
-
-	batch := a.db.NewBatch()
-	for _, r := range matched {
-		if err := batch.Delete([]byte(r.Key), nil); err != nil {
+		oldRules = append(oldRules, r.Rule())
+		if err := batch.Delete(a.withPrefix(r.Key), nil); err != nil {
 			return nil, err
 		}
 	}
-
 	for _, r := range newPolicies {
 		new := convertRule(ptype, r)
 
@@ -347,14 +362,9 @@ func (a *adapter) UpdateFilteredPolicies(_ string, ptype string, newPolicies [][
 			return nil, err
 		}
 
-		if err := batch.Set([]byte(new.Key), bts, nil); err != nil {
+		if err := batch.Set(a.withPrefix(new.Key), bts, nil); err != nil {
 			return nil, err
 		}
-	}
-
-	oldRules := make([][]string, 0, len(matched))
-	for _, r := range matched {
-		oldRules = append(oldRules, r.Rule())
 	}
 
 	return oldRules, nil
@@ -383,24 +393,6 @@ func loadPolicy(rule CasbinRule, model model.Model) {
 	}
 
 	persist.LoadPolicyLine(lineText, model)
-}
-
-func loadCsvPolicyLine(line string, model model.Model) error {
-	if line == "" || strings.HasPrefix(line, "#") {
-		return nil
-	}
-
-	reader := csv.NewReader(strings.NewReader(line))
-	reader.TrimLeadingSpace = true
-	tokens, err := reader.Read()
-	if err != nil {
-		return err
-	}
-
-	key := tokens[0]
-	sec := key[:1]
-	model[sec][key].Policy = append(model[sec][key].Policy, tokens[1:])
-	return nil
 }
 
 func convertRule(ptype string, line []string) CasbinRule {

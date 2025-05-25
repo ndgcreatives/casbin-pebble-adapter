@@ -7,6 +7,7 @@ import (
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/util"
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/vfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
@@ -30,13 +31,15 @@ func testGetPolicy(t *testing.T, e casbin.IEnforcer, wanted [][]string) {
 func (suite *AdapterTestSuite) SetupTest() {
 	t := suite.T()
 
-	db, err := pebble.Open(testDB, &pebble.Options{})
+	db, err := pebble.Open(testDB, &pebble.Options{
+		FS: vfs.NewMem(),
+	})
 	if err != nil {
 		t.Fatalf("error opening db: %s\n", err.Error())
 	}
 	suite.db = db
 
-	a, err := NewAdapter(db, "casbin")
+	a, err := NewAdapter(db, "casbin::")
 	if err != nil {
 		t.Error(err)
 	}
@@ -81,11 +84,9 @@ func (suite *AdapterTestSuite) Test_AutoSavePolicy() {
 	e.AddPolicies([][]string{{"roger", "data1", "read"}, {"roger", "data1", "write"}})
 	testGetPolicy(t, e, [][]string{{"roger", "data1", "read"}, {"roger", "data1", "write"}})
 
-	e.RemoveFilteredPolicy(0, "roger")
-	testGetPolicy(t, e, [][]string{})
-
 	_, err := e.RemoveFilteredPolicy(1, "data1")
-	assert.EqualError(t, err, "fieldIndex != 0: adapter only supports filter by prefix")
+	assert.NoError(t, err)
+	testGetPolicy(t, e, [][]string{})
 
 	e.AddPolicies([][]string{{"roger", "data1", "read"}, {"roger", "data1", "write"}})
 	testGetPolicy(t, e, [][]string{{"roger", "data1", "read"}, {"roger", "data1", "write"}})

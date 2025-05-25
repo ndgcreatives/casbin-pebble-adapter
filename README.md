@@ -1,6 +1,6 @@
 #### Casbin Pebble Adapter (Experimental)
 
-A simple Casbin Pebble Adapter (see https://casbin.org/docs/en/adapters).
+A simple Casbin Pebble Adapter (see https://casbin.org/docs/adapters).
 This flavour supports the **auto-save** functionality.
 
 Right now it supports the autosave functionality, and I've worked in some restricted filtered adapter functionality - difficult with a simple k/v store.
