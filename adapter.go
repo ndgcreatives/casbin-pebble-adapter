@@ -54,9 +54,9 @@ func NewAdapter(db *pebble.DB, prefix string) (persist.BatchAdapter, error) {
 	return adapter, nil
 }
 
-func (a *adapter) IsFiltered() bool {
-	return false
-}
+// func (a *adapter) IsFiltered() bool {
+// 	return false
+// }
 
 // LoadPolicy performs a scan on the bucket and individually loads every line into the Casbin model.
 // Not particularity efficient but should only be required on when you application starts up as this adapter can
@@ -114,30 +114,6 @@ func (a *adapter) AddPolicies(_ string, ptype string, rules [][]string) error {
 	return nil
 }
 
-// RemoveFilteredPolicy has an implementation that is slightly limited in that we can only find and remove elements
-// using a policy line prefix.
-//
-// For example, if you have the following policy:
-//
-//	p, subject-a, action-a, get
-//	p, subject-a, action-a, write
-//	p, subject-b, action-a, get
-//	p, subject-b, action-a, write
-//
-// The following would remove all subject-a rules:
-//
-//	enforcer.RemoveFilteredPolicy(0, "subject-a")
-//
-// The following would remove all subject-a rules that contain action-a:
-//
-//	enforcer.RemoveFilteredPolicy(0, "subject-a", "action-a")
-//
-// The following does not work and will return an error:
-//
-//	enforcer.RemoveFilteredPolicy(1, "action-a")
-//
-// This is because we use leverage Pebble's prefix scan to find an item.
-// Once these keys are found we can iterate over and remove them.
 // Each policy rule is stored as a row in Pebble: p::subject-a::action-a::get
 func (a *adapter) RemoveFilteredPolicy(_ string, ptype string, fieldIndex int, fieldValues ...string) error {
 	rule := CasbinRule{}

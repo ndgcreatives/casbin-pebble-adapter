@@ -5,10 +5,12 @@ import (
 	"testing"
 
 	"github.com/casbin/casbin/v2"
+	fileadapter "github.com/casbin/casbin/v2/persist/file-adapter"
 	"github.com/casbin/casbin/v2/util"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/vfs"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -28,26 +30,43 @@ func testGetPolicy(t *testing.T, e casbin.IEnforcer, wanted [][]string) {
 	}
 }
 
+func TestAdapterFromFileExample(t *testing.T) {
+	r := require.New(t)
+	db, err := pebble.Open(testDB, &pebble.Options{
+		FS: vfs.NewMem(),
+	})
+	r.NoError(err)
+	pa, err := NewAdapter(db, "casbin::")
+	r.NoError(err)
+	pebbleEnforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", pa)
+	r.NoError(err)
+
+	fa := fileadapter.NewAdapter("examples/rbac_policy.csv")
+	fileEnforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", fa)
+	r.NoError(err)
+
+	ok, err := pebbleEnforcer.AddPolicies(fileEnforcer.GetPolicy())
+	r.NoError(err)
+	assert.True(t, ok)
+
+	testGetPolicy(t, pebbleEnforcer, fileEnforcer.GetPolicy())
+}
+
 func (suite *AdapterTestSuite) SetupTest() {
 	t := suite.T()
+	r := require.New(t)
 
 	db, err := pebble.Open(testDB, &pebble.Options{
 		FS: vfs.NewMem(),
 	})
-	if err != nil {
-		t.Fatalf("error opening db: %s\n", err.Error())
-	}
+	r.NoError(err)
 	suite.db = db
 
 	a, err := NewAdapter(db, "casbin::")
-	if err != nil {
-		t.Error(err)
-	}
+	r.NoError(err)
 
 	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
-	if err != nil {
-		t.Errorf("error creating enforcer: %s\n", err.Error())
-	}
+	r.NoError(err)
 
 	suite.enforcer = enforcer
 }
