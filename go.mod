@@ -1,4 +1,4 @@
-module github.com/project-sidonia/casbin-pebble-adapter
+module github.com/ndgcreatives/casbin-pebble-adapter
 
 go 1.22
 
